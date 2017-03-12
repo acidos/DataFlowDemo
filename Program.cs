@@ -34,38 +34,43 @@ namespace DataFlowDemo
             for (int cell = 1; cell <= 3; cell++)
             {
                 Cell newCell = new Cell() { Number = cell };
+                newCell.TestsToPerform = new List<int> { Tests.TEST1, Tests.TEST2, Tests.TEST3 };
                 cells.Add(newCell);
-                if (cell == 1)
+                
+                /*if (cell == 1)
                     newCell.TestsToPerform = new List<int> { Tests.TEST1, Tests.TEST2, Tests.TEST3 };
                 if (cell == 2)
                     newCell.TestsToPerform = new List<int> { Tests.TEST1, Tests.TEST2, Tests.TEST3 };
                 if (cell == 3)
-                    newCell.TestsToPerform = new List<int> { Tests.TEST3 };
+                    newCell.TestsToPerform = new List<int> { Tests.TEST3 };*/
             }
 
         }
         public async Task<bool> Start()
         {
-            var blockPrepare = CreateExceptionCatchingTransformBlock(new Func<Cell, Task<Cell>>(Tests.Prepare), new ExecutionDataflowBlockOptions
+            var blockPrepare = CreateExceptionCatchingTransformBlock(new Func<Cell, Task<Cell>>(Tests.Prepare), new Action<Exception, Cell>(HandleUnhandledException), new ExecutionDataflowBlockOptions
             {
                 BoundedCapacity = DataflowBlockOptions.Unbounded,
-                MaxDegreeOfParallelism = 40
+                MaxDegreeOfParallelism = 40,
+                EnsureOrdered = false                
             });
 
             var blockFinalize = CreateExceptionCatchingActionBlock(new Func<Cell, Task>(Tests.Finalize), new ExecutionDataflowBlockOptions
             {
                 BoundedCapacity = DataflowBlockOptions.Unbounded,
-                MaxDegreeOfParallelism = 40
+                MaxDegreeOfParallelism = 40,
+                EnsureOrdered = false
             });
 
             List<IPropagatorBlock<Cell, Cell>> blockList = new List<IPropagatorBlock<Cell, Cell>>();
             var funcs = tests.Select(x => x.Value);
             foreach (var func in funcs)
             {
-                var blockNew = CreateExceptionCatchingTransformBlock(new Func<Cell, Task<Cell>>(func), new ExecutionDataflowBlockOptions
+                var blockNew = CreateExceptionCatchingTransformBlock(new Func<Cell, Task<Cell>>(func), new Action<Exception, Cell>(HandleUnhandledException), new ExecutionDataflowBlockOptions
                 {
                     BoundedCapacity = DataflowBlockOptions.Unbounded,
-                    MaxDegreeOfParallelism = 40
+                    MaxDegreeOfParallelism = 40,
+                    EnsureOrdered = false
                 });
                 blockList.Add(blockNew);
             }
@@ -76,7 +81,15 @@ namespace DataFlowDemo
                 var b1 = blockList[i];
                 var b2 = blockList[i + 1];
                 b1.LinkTo(b2, new DataflowLinkOptions { PropagateCompletion = true });
+
+                /*await b1.Completion.ContinueWith(t =>
+                {
+                    if (t.IsFaulted) ((IDataflowBlock)b2).Fault(t.Exception);
+                    else b2.Complete();
+                });*/
             }
+
+            Console.WriteLine("test");
 
             // link first and last
             blockPrepare.LinkTo(blockList[0], new DataflowLinkOptions { PropagateCompletion = true });
@@ -88,19 +101,41 @@ namespace DataFlowDemo
             };
 
             blockPrepare.Complete();
-            await blockFinalize.Completion;
+
+            try
+            {
+                await blockFinalize.Completion;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("ex.Message: {0}", ex.Message);
+            }
 
             return true;
         }
 
+        private void HandleUnhandledException(Exception ex, Cell c)
+        {
+            Console.WriteLine("Unhandled Exception: {0}", ex.Message);
+        }
+
         public IPropagatorBlock<TInput, TOutput> CreateExceptionCatchingTransformBlock<TInput, TOutput>(
                 Func<TInput, Task<TOutput>> transform,
+                Action<Exception, Cell> exceptionHandler,
                 ExecutionDataflowBlockOptions dataflowBlockOptions)
         {
             var newBlock = new TransformBlock<TInput, TOutput>(async (TInput input) =>
             {
-                var result = await transform(input);
-                return result;
+                try
+                {
+                    var result = await transform(input);
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    exceptionHandler(ex, (input as Cell));
+                    return default(TOutput);//(TOutput)Convert.ChangeType(input, typeof(TOutput));
+                }
             }, dataflowBlockOptions);
 
             return newBlock;
@@ -130,17 +165,15 @@ namespace DataFlowDemo
         public static int TEST3 = 102;
         public static async Task<Cell> Prepare(Cell c)
         {
-            Console.WriteLine("#{0} Preparing...", c.Number);
+            Console.WriteLine("Cell {0} Preparing...", c.Number);
             await Task.Delay(5000);
-            //Console.WriteLine("#{0} Prepared", c.Number);
             return c;
         }
 
         public static async Task<Cell> Finalize(Cell c)
         {
-            Console.WriteLine("#{0} Finalizing...", c.Number);
+            Console.WriteLine("Cell {0} Finalizing...", c.Number);
             await Task.Delay(5000);
-            //Console.WriteLine("#{0} Finalized", c.Number);
             return c;
         }
 
@@ -149,13 +182,16 @@ namespace DataFlowDemo
             int thisTestID = TEST1;
             if(!c.TestsToPerform.Contains(thisTestID))
             {
-                Console.WriteLine("#{0} Test1 skipped", c.Number);
+                Console.WriteLine("Cell {0} Test1 skipped", c.Number);
                 return c;
             }
-                
-            Console.WriteLine("#{0} Test1 running...", c.Number);
+
+            Console.WriteLine("Cell {0} Test1 running...", c.Number);
             await Task.Delay(5000);
-            //Console.WriteLine("#{0} Test1 complete", c.Number);
+
+            if (c.Number == 1)
+                throw new Exception("Exception happened");
+
             return c;
         }
 
@@ -164,13 +200,12 @@ namespace DataFlowDemo
             int thisTestID = TEST2;
             if (!c.TestsToPerform.Contains(thisTestID))
             {
-                Console.WriteLine("#{0} Test2 skipped", c.Number);
+                Console.WriteLine("Cell {0} Test2 skipped", c.Number);
                 return c;
             }
 
-            Console.WriteLine("#{0} Test2 running...", c.Number);
+            Console.WriteLine("Cell {0} Test2 running...", c.Number);
             await Task.Delay(5000);
-            //Console.WriteLine("#{0} Test2 complete", c.Number);
             return c;
         }
 
@@ -179,13 +214,12 @@ namespace DataFlowDemo
             int thisTestID = TEST3;
             if (!c.TestsToPerform.Contains(thisTestID))
             {
-                Console.WriteLine("#{0} Test3 skipped", c.Number);
+                Console.WriteLine("Cell {0} Test3 skipped", c.Number);
                 return c;
             }
 
-            Console.WriteLine("#{0} Test3 running...", c.Number);
+            Console.WriteLine("Cell {0} Test3 running...", c.Number);
             await Task.Delay(5000);
-            //Console.WriteLine("#{0} Test3 complete", c.Number);
             return c;
         }
 
